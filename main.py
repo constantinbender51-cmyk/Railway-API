@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to retrieve and display deployment IDs for a Railway project.
+Script to retrieve and display logs of the most recent Railway deployment.
 """
 
 import os
@@ -47,11 +47,11 @@ class RailwayDeploymentMonitor:
             print(f"API request failed: {e}")
             return {}
 
-    def get_all_deployments(self, project_id: str, limit: int = 20) -> list:
-        """Get all deployments for a project"""
+    def get_latest_deployment(self, project_id: str) -> dict:
+        """Get the latest deployment for a project"""
         query = """
-        query GetDeployments($projectId: String!, $limit: Int!) {
-            deployments(input: {projectId: $projectId}, first: $limit) {
+        query GetDeployments($projectId: String!) {
+            deployments(input: {projectId: $projectId}, first: 1) {
                 edges {
                     node {
                         id
@@ -65,42 +65,83 @@ class RailwayDeploymentMonitor:
             }
         }
         """
-        variables = {
-            "projectId": project_id,
-            "limit": limit
+        variables = {"projectId": project_id}
+        result = self.make_graphql_request(query, variables)
+        if not result:
+            return None
+        
+        deployments = result.get("data", {}).get("deployments", {}).get("edges", [])
+        if not deployments:
+            return None
+            
+        deployment = deployments[0]["node"]
+        return {
+            "id": deployment["id"], 
+            "status": deployment["status"], 
+            "createdAt": deployment["createdAt"],
+            "environment": deployment["environment"]["name"] if deployment["environment"] else "Unknown"
         }
+
+    def get_deployment_logs(self, deployment_id: str) -> list:
+        """Get logs for a deployment"""
+        query = """
+        query GetDeploymentLogs($deploymentId: String!) {
+            deployment(id: $deploymentId) {
+                deploymentsLogs {
+                    timestamp
+                    message
+                    level
+                }
+            }
+        }
+        """
+        variables = {"deploymentId": deployment_id}
         result = self.make_graphql_request(query, variables)
         if not result:
             return []
-        
-        deployments = result.get("data", {}).get("deployments", {}).get("edges", [])
-        return [{
-            "id": d["node"]["id"], 
-            "status": d["node"]["status"], 
-            "createdAt": d["node"]["createdAt"],
-            "environment": d["node"]["environment"]["name"] if d["node"]["environment"] else "Unknown"
-        } for d in deployments]
+            
+        deployment = result.get("data", {}).get("deployment", {})
+        if not deployment:
+            return []
+            
+        logs = deployment.get("deploymentsLogs", [])
+        return sorted(logs, key=lambda x: x["timestamp"])
 
 def main():
     monitor = RailwayDeploymentMonitor(RAILWAY_TOKEN)
     
-    print(f"Fetching deployments for project: {PROJECT_ID}")
+    print(f"Fetching latest deployment for project: {PROJECT_ID}")
     
-    deployments = monitor.get_all_deployments(PROJECT_ID)
+    # Get the latest deployment
+    deployment = monitor.get_latest_deployment(PROJECT_ID)
     
-    if not deployments:
+    if not deployment:
         print("No deployments found for this project")
         return
     
-    print(f"\nFound {len(deployments)} deployments:")
+    print(f"\nLatest Deployment:")
+    print(f"ID: {deployment['id']}")
+    print(f"Status: {deployment['status']}")
+    print(f"Environment: {deployment['environment']}")
+    print(f"Created: {deployment['createdAt']}")
+    
+    print(f"\nFetching logs for deployment: {deployment['id']}")
+    
+    # Get and display the logs
+    logs = monitor.get_deployment_logs(deployment['id'])
+    
+    if not logs:
+        print("No logs available for this deployment")
+        return
+    
+    print(f"\nFound {len(logs)} log entries:")
     print("=" * 80)
     
-    for i, deployment in enumerate(deployments):
-        print(f"{i + 1}. Deployment ID: {deployment['id']}")
-        print(f"   Status: {deployment['status']}")
-        print(f"   Environment: {deployment['environment']}")
-        print(f"   Created: {deployment['createdAt']}")
-        print()
+    for log in logs:
+        timestamp = log["timestamp"]
+        level = log.get("level", "INFO")
+        message = log["message"]
+        print(f"[{timestamp}] [{level}] {message}")
 
 if __name__ == "__main__":
     main()
