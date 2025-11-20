@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 DeepSeek Coding Agent Script
-With enhanced network error handling and diagnostics
+Applies changes directly to GitHub via API
 """
 
 import os
 import json
 import requests
+import base64
 import socket
-import time
-import subprocess
 from typing import Dict, List, Any
 
 # Configuration
@@ -21,6 +20,7 @@ class DeepSeekCodingAgent:
     def __init__(self):
         self.load_environment_variables()
         self.repo_content = ""
+        self.current_files = {}
         
     def load_environment_variables(self):
         """Load required environment variables"""
@@ -42,20 +42,17 @@ class DeepSeekCodingAgent:
         """Check network connectivity to required services"""
         print("🔍 Checking network connectivity...")
         
-        # Test DNS resolution
         try:
             github_ip = socket.gethostbyname('api.github.com')
             deepseek_ip = socket.gethostbyname('api.deepseek.com')
             print(f"✅ DNS Resolution: api.github.com -> {github_ip}")
             print(f"✅ DNS Resolution: api.deepseek.com -> {deepseek_ip}")
         except socket.gaierror as e:
-            raise Exception(f"DNS resolution failed: {e}\n"
-                          "Please check your internet connection and DNS settings.")
+            raise Exception(f"DNS resolution failed: {e}")
         
-        # Test basic connectivity
         test_urls = {
-            'GitHub API': 'https://api.github.com',
-            'DeepSeek API': 'https://api.deepseek.com'
+            'GitHub API': GITHUB_API_URL,
+            'DeepSeek API': DEEPSEEK_API_URL
         }
         
         for service, url in test_urls.items():
@@ -63,9 +60,9 @@ class DeepSeekCodingAgent:
                 response = requests.get(url, timeout=10)
                 print(f"✅ {service} reachable (Status: {response.status_code})")
             except requests.exceptions.Timeout:
-                raise Exception(f"❌ {service} timeout - connection too slow")
+                raise Exception(f"❌ {service} timeout")
             except requests.exceptions.ConnectionError:
-                raise Exception(f"❌ {service} connection failed - check network/firewall")
+                raise Exception(f"❌ {service} connection failed")
             except Exception as e:
                 print(f"⚠️  {service} check: {e}")
     
@@ -77,14 +74,12 @@ class DeepSeekCodingAgent:
                 'Accept': 'application/vnd.github.v3+json'
             }
             
-            # Test token access
             response = requests.get(f"{GITHUB_API_URL}/user", headers=headers, timeout=10)
             response.raise_for_status()
             
             user_data = response.json()
             print(f"✅ GitHub token validated for user: {user_data.get('login', 'Unknown')}")
             
-            # Test repository access
             repo_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}"
             repo_response = requests.get(repo_url, headers=headers, timeout=10)
             
@@ -97,40 +92,53 @@ class DeepSeekCodingAgent:
             
             return True
             
-        except requests.exceptions.Timeout:
-            raise Exception("GitHub API timeout - connection too slow")
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"GitHub API connection failed: {e}")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"GitHub API validation failed: {e}")
     
     def get_repo_structure(self):
-        """Get the current repository structure and content with fallback"""
+        """Get the current repository structure and content"""
         try:
             headers = {
                 'Authorization': f'token {self.github_token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
             
-            # Try to get repository contents
-            url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/"
-            response = requests.get(url, headers=headers, timeout=15)
+            # Get default branch first
+            repo_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}"
+            repo_response = requests.get(repo_url, headers=headers)
+            repo_response.raise_for_status()
+            default_branch = repo_response.json().get('default_branch', 'main')
             
-            if response.status_code == 200:
-                files = []
-                for item in response.json():
-                    if item['type'] == 'file':
-                        files.append(item['name'])
-                
-                structure_info = f"Files: {', '.join(files) if files else 'Empty repository'}"
-                self.repo_content = structure_info
-                return self.repo_content
-            else:
-                self.repo_content = "Unable to fetch repository structure (may be empty or no access)"
-                return self.repo_content
-                
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️  Could not fetch repository structure: {e}")
-            self.repo_content = "Unable to fetch repository structure due to network issues"
+            # Get repository contents recursively
+            contents_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/trees/{default_branch}?recursive=1"
+            contents_response = requests.get(contents_url, headers=headers)
+            contents_response.raise_for_status()
+            
+            tree_data = contents_response.json()
+            files = {}
+            
+            for item in tree_data.get('tree', []):
+                if item['type'] == 'blob':  # Only files
+                    file_path = item['path']
+                    
+                    # Get file content
+                    file_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/{file_path}"
+                    file_response = requests.get(file_url, headers=headers)
+                    
+                    if file_response.status_code == 200:
+                        file_data = file_response.json()
+                        if file_data.get('encoding') == 'base64':
+                            content = base64.b64decode(file_data['content']).decode('utf-8')
+                            files[file_path] = content
+            
+            self.current_files = files
+            
+            structure_info = f"Files: {', '.join(files.keys()) if files else 'Empty repository'}"
+            self.repo_content = structure_info
             return self.repo_content
+            
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to fetch repository structure: {e}")
     
     def call_deepseek_api(self, instruction: str) -> str:
         """Call DeepSeek API with the instruction"""
@@ -141,30 +149,31 @@ class DeepSeekCodingAgent:
             }
             
             prompt = f"""
-            Current repository status: {self.repo_content}
+            Current repository files: {list(self.current_files.keys())}
             
             Instruction: {instruction}
             
             Respond with JSON instructions for file operations. Use the following format:
             
-            For creating files:
-            {{"operation": "create", "file": "filename.ext", "content": "file content"}}
+            For creating new files:
+            {{"operation": "create", "file": "filename.ext", "content": "full file content"}}
+            
+            For updating existing files (complete replacement):
+            {{"operation": "update", "file": "filename.ext", "content": "new full file content"}}
             
             For deleting files:
             {{"operation": "delete", "file": "filename.ext"}}
             
-            For inserting code at specific line:
-            {{"operation": "insert", "file": "filename.ext", "line": 5, "content": "code to insert"}}
-            
-            For deleting lines from specific line:
-            {{"operation": "delete_lines", "file": "filename.ext", "line": 10, "count": 3}}
-            
             Return a JSON array of operations. Example:
             [
-                {{"operation": "create", "file": "hello.py", "content": "print('Hello World!')"}}
+                {{"operation": "create", "file": "hello.py", "content": "print('Hello World!')"}},
+                {{"operation": "update", "file": "README.md", "content": "# Updated Readme"}}
             ]
             
-            Important: Only respond with valid JSON array, no additional text.
+            Important: 
+            - Only respond with valid JSON array, no additional text
+            - For updates, provide the complete new file content
+            - You can create, update, or delete multiple files
             """
             
             payload = {
@@ -184,19 +193,12 @@ class DeepSeekCodingAgent:
             print("✅ DeepSeek API response received")
             return response.json()['choices'][0]['message']['content']
             
-        except requests.exceptions.Timeout:
-            raise Exception("DeepSeek API request timed out after 30 seconds")
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"Failed to connect to DeepSeek API: {e}")
         except requests.exceptions.RequestException as e:
             raise Exception(f"DeepSeek API call failed: {e}")
-        except KeyError as e:
-            raise Exception(f"Unexpected response format from DeepSeek API: {e}")
     
     def parse_instructions(self, response: str) -> List[Dict[str, Any]]:
         """Parse the JSON instructions from DeepSeek response"""
         try:
-            # Clean the response
             cleaned_response = response.strip()
             if '```json' in cleaned_response:
                 cleaned_response = cleaned_response.split('```json')[1].split('```')[0]
@@ -210,24 +212,49 @@ class DeepSeekCodingAgent:
             if not isinstance(instructions, list):
                 raise ValueError("Instructions should be a JSON array")
                 
-            # Validate instructions
             for i, instruction in enumerate(instructions):
                 if 'operation' not in instruction:
                     raise ValueError(f"Instruction {i} missing 'operation' field")
                 if 'file' not in instruction:
                     raise ValueError(f"Instruction {i} missing 'file' field")
+                if instruction['operation'] in ['create', 'update'] and 'content' not in instruction:
+                    raise ValueError(f"Instruction {i} missing 'content' field for {instruction['operation']} operation")
                     
             return instructions
             
         except json.JSONDecodeError as e:
             print(f"Raw response that failed to parse: {response}")
             raise Exception(f"Failed to parse JSON instructions: {e}")
-        except Exception as e:
-            raise Exception(f"Failed to parse instructions: {e}")
     
-    def apply_file_operations(self, instructions: List[Dict[str, Any]]):
-        """Apply file operations locally"""
+    def apply_operations_to_github(self, instructions: List[Dict[str, Any]]):
+        """Apply file operations directly to GitHub"""
         applied_operations = []
+        
+        # Get the latest commit SHA and default branch
+        headers = {
+            'Authorization': f'token {self.github_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        repo_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}"
+        repo_response = requests.get(repo_url, headers=headers)
+        repo_response.raise_for_status()
+        default_branch = repo_response.json().get('default_branch', 'main')
+        
+        # Get the latest commit SHA
+        branch_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/branches/{default_branch}"
+        branch_response = requests.get(branch_url, headers=headers)
+        branch_response.raise_for_status()
+        latest_commit_sha = branch_response.json()['commit']['sha']
+        
+        # Get the current tree SHA
+        commit_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/commits/{latest_commit_sha}"
+        commit_response = requests.get(commit_url, headers=headers)
+        commit_response.raise_for_status()
+        base_tree_sha = commit_response.json()['tree']['sha']
+        
+        # Process each operation
+        tree_entries = []
         
         for instruction in instructions:
             try:
@@ -237,105 +264,105 @@ class DeepSeekCodingAgent:
                 print(f"  Processing: {op_type} on {filename}")
                 
                 if op_type == 'create':
-                    content = instruction.get('content', '')
-                    # Create directory if needed
-                    dir_name = os.path.dirname(filename)
-                    if dir_name:
-                        os.makedirs(dir_name, exist_ok=True)
-                    
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        f.write(content)
+                    content = instruction['content']
+                    tree_entries.append({
+                        'path': filename,
+                        'mode': '100644',
+                        'type': 'blob',
+                        'content': content
+                    })
                     applied_operations.append(f"Created file: {filename}")
                     
+                elif op_type == 'update':
+                    content = instruction['content']
+                    # First, get the current file SHA to update it
+                    file_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/{filename}"
+                    file_response = requests.get(file_url, headers=headers)
+                    
+                    if file_response.status_code == 200:
+                        file_data = file_response.json()
+                        tree_entries.append({
+                            'path': filename,
+                            'mode': '100644',
+                            'type': 'blob',
+                            'content': content,
+                            'sha': file_data['sha']  # Include SHA for updates
+                        })
+                        applied_operations.append(f"Updated file: {filename}")
+                    else:
+                        # File doesn't exist, create it instead
+                        tree_entries.append({
+                            'path': filename,
+                            'mode': '100644',
+                            'type': 'blob',
+                            'content': content
+                        })
+                        applied_operations.append(f"Created file (was missing): {filename}")
+                        
                 elif op_type == 'delete':
-                    if os.path.exists(filename):
-                        os.remove(filename)
+                    # For deletion, we need to get the file SHA first
+                    file_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/{filename}"
+                    file_response = requests.get(file_url, headers=headers)
+                    
+                    if file_response.status_code == 200:
+                        file_data = file_response.json()
+                        tree_entries.append({
+                            'path': filename,
+                            'mode': '100644',
+                            'type': 'blob',
+                            'sha': None  # Setting SHA to None deletes the file
+                        })
                         applied_operations.append(f"Deleted file: {filename}")
                     else:
                         print(f"⚠️  File not found for deletion: {filename}")
                         
-                elif op_type == 'insert':
-                    line_num = instruction.get('line')
-                    content = instruction.get('content', '')
-                    
-                    if line_num is None:
-                        raise ValueError("Missing 'line' for insert operation")
-                    
-                    if not os.path.exists(filename):
-                        # Create file if it doesn't exist
-                        with open(filename, 'w', encoding='utf-8') as f:
-                            f.write(content + '\n')
-                        applied_operations.append(f"Created file with content: {filename}")
-                    else:
-                        with open(filename, 'r', encoding='utf-8') as f:
-                            lines = f.readlines()
-                        
-                        # Insert at specific line (1-indexed)
-                        if line_num < 1 or line_num > len(lines) + 1:
-                            raise ValueError(f"Line number {line_num} out of range for file {filename}")
-                        
-                        lines.insert(line_num - 1, content + '\n')
-                        
-                        with open(filename, 'w', encoding='utf-8') as f:
-                            f.writelines(lines)
-                        
-                        applied_operations.append(f"Inserted content at line {line_num} in: {filename}")
-                    
-                elif op_type == 'delete_lines':
-                    line_num = instruction.get('line')
-                    lines_to_delete = instruction.get('count', 1)
-                    
-                    if line_num is None:
-                        raise ValueError("Missing 'line' for delete_lines operation")
-                    
-                    if not os.path.exists(filename):
-                        raise ValueError(f"File not found: {filename}")
-                    
-                    with open(filename, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-                    
-                    if line_num < 1 or line_num > len(lines):
-                        raise ValueError(f"Line number {line_num} out of range for file {filename}")
-                    
-                    start_idx = line_num - 1
-                    end_idx = start_idx + int(lines_to_delete)
-                    del lines[start_idx:end_idx]
-                    
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        f.writelines(lines)
-                    
-                    applied_operations.append(f"Deleted {lines_to_delete} lines starting from line {line_num} in: {filename}")
-                    
                 else:
                     raise ValueError(f"Unknown operation: {op_type}")
                     
             except Exception as e:
-                raise Exception(f"Failed to apply operation {json.dumps(instruction)}: {e}")
+                raise Exception(f"Failed to process operation {json.dumps(instruction)}: {e}")
         
+        if not tree_entries:
+            print("ℹ️  No changes to apply")
+            return applied_operations
+        
+        # Create new tree
+        tree_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/trees"
+        tree_payload = {
+            'base_tree': base_tree_sha,
+            'tree': tree_entries
+        }
+        tree_response = requests.post(tree_url, headers=headers, json=tree_payload)
+        tree_response.raise_for_status()
+        new_tree_sha = tree_response.json()['sha']
+        
+        # Create new commit
+        commit_payload = {
+            'message': 'Auto-commit: Changes applied by DeepSeek Coding Agent',
+            'tree': new_tree_sha,
+            'parents': [latest_commit_sha]
+        }
+        commit_response = requests.post(
+            f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/commits",
+            headers=headers,
+            json=commit_payload
+        )
+        commit_response.raise_for_status()
+        new_commit_sha = commit_response.json()['sha']
+        
+        # Update branch reference
+        ref_payload = {
+            'sha': new_commit_sha
+        }
+        ref_response = requests.patch(
+            f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/refs/heads/{default_branch}",
+            headers=headers,
+            json=ref_payload
+        )
+        ref_response.raise_for_status()
+        
+        applied_operations.append(f"✅ Successfully pushed {len([x for x in tree_entries if x.get('sha') is not None])} changes to GitHub")
         return applied_operations
-    
-    def create_simple_hello_world(self):
-        """Create a simple hello world program as fallback"""
-        print("🔄 Creating simple hello world program as fallback...")
-        
-        instructions = [
-            {
-                "operation": "create",
-                "file": "hello.py",
-                "content": "#!/usr/bin/env python3\nprint('Hello, World!')"
-            },
-            {
-                "operation": "create", 
-                "file": "README.md",
-                "content": "# Hello World\n\nThis is a simple hello world program created by DeepSeek Coding Agent."
-            }
-        ]
-        
-        applied_ops = self.apply_file_operations(instructions)
-        for op in applied_ops:
-            print(f"  ✅ {op}")
-        
-        return applied_ops
     
     def run(self, instruction: str = None):
         """Main execution method"""
@@ -357,63 +384,31 @@ class DeepSeekCodingAgent:
             else:
                 print(f"📝 Using instruction: '{instruction}'")
             
-            # Get repository structure (with fallback)
+            # Get repository structure
             print("📁 Fetching repository structure...")
             repo_structure = self.get_repo_structure()
             print(f"📊 Repository: {repo_structure}")
             
-            # Try to call DeepSeek API
-            try:
-                print("🤖 Calling DeepSeek API...")
-                deepseek_response = self.call_deepseek_api(instruction)
-                
-                print("📝 Parsing instructions...")
-                instructions = self.parse_instructions(deepseek_response)
-                print(f"📋 Parsed {len(instructions)} operation(s)")
-                
-                # Apply file operations
-                print("⚡ Applying file operations locally...")
-                applied_ops = self.apply_file_operations(instructions)
-                for op in applied_ops:
-                    print(f"  ✅ {op}")
-                
-                if not applied_ops:
-                    print("ℹ️  No file operations were applied")
-                    return
-                    
-            except Exception as e:
-                print(f"⚠️  DeepSeek API failed: {e}")
-                print("🔄 Using fallback hello world creation...")
-                applied_ops = self.create_simple_hello_world()
+            # Call DeepSeek API
+            print("🤖 Calling DeepSeek API...")
+            deepseek_response = self.call_deepseek_api(instruction)
             
-            # Try to push to GitHub, but don't fail if network is down
-            try:
-                print("📤 Attempting to push changes to GitHub...")
-                # For now, just show what would be pushed
-                print("✅ Local files created successfully")
-                print("📁 Files created locally:")
-                for root, dirs, files in os.walk('.'):
-                    for file in files:
-                        if not file.startswith('.') and file != os.path.basename(__file__):
-                            filepath = os.path.join(root, file)
-                            print(f"  - {filepath}")
-                
-                print("\n💡 Note: GitHub push skipped due to network constraints")
-                print("💡 You can manually push using: git add . && git commit -m 'Update' && git push")
-                
-            except Exception as e:
-                print(f"⚠️  GitHub push failed: {e}")
-                print("✅ Local files created successfully despite GitHub issues")
+            print("📝 Parsing instructions...")
+            instructions = self.parse_instructions(deepseek_response)
+            print(f"📋 Parsed {len(instructions)} operation(s)")
             
-            print("🎉 Operations completed!")
+            # Apply operations directly to GitHub
+            print("⚡ Applying operations directly to GitHub...")
+            applied_ops = self.apply_operations_to_github(instructions)
+            
+            print("📊 Operation Results:")
+            for op in applied_ops:
+                print(f"  {op}")
+            
+            print("🎉 All operations completed successfully!")
             
         except Exception as e:
             print(f"❌ Error: {e}")
-            print("\n🔧 Troubleshooting tips:")
-            print("1. Check your internet connection")
-            print("2. Verify DNS settings (try: nslookup api.github.com)")
-            print("3. Check firewall/proxy settings")
-            print("4. Verify API keys and repository name")
             raise
 
 def main():
