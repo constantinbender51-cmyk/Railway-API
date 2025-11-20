@@ -464,3 +464,77 @@ class DeepSeekCodingAgent:
         }
         ref_response = requests.patch(
             f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/refs/heads/{default_branch}",
+            headers=headers,
+            json=ref_payload
+        )
+        ref_response.raise_for_status()
+        
+        applied_operations.append(f"✅ Successfully pushed {len([x for x in tree_entries if x.get('sha') is not None])} changes to GitHub")
+        return applied_operations
+    
+    def run(self, instruction: str = None):
+        """Main execution method"""
+        try:
+            print("🚀 Starting DeepSeek Coding Agent...")
+            print("=" * 50)
+            
+            # Check network first
+            self.check_network_connectivity()
+            print("✅ Network connectivity confirmed")
+            
+            # Validate GitHub token
+            self.validate_github_token()
+            
+            # Use default instruction if none provided
+            if instruction is None:
+                instruction = DEFAULT_INSTRUCTION
+                print(f"📝 Using default instruction: '{instruction}'")
+            else:
+                print(f"📝 Using instruction: '{instruction}'")
+            
+            # Get repository structure (handles empty repos)
+            print("📁 Fetching repository structure...")
+            repo_structure = self.get_repo_structure()
+            print(f"📊 Repository: {repo_structure}")
+            
+            # Call DeepSeek API
+            print("🤖 Calling DeepSeek API...")
+            deepseek_response = self.call_deepseek_api(instruction)
+            
+            print("📝 Parsing instructions...")
+            instructions = self.parse_instructions(deepseek_response)
+            print(f"📋 Parsed {len(instructions)} operation(s)")
+            
+            # Apply operations directly to GitHub
+            print("⚡ Applying operations directly to GitHub...")
+            applied_ops = self.apply_operations_to_github(instructions)
+            
+            print("📊 Operation Results:")
+            for op in applied_ops:
+                print(f"  {op}")
+            
+            print("🎉 All operations completed successfully!")
+            
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            raise
+
+def main():
+    """Main function"""
+    import sys
+    
+    try:
+        agent = DeepSeekCodingAgent()
+        
+        if len(sys.argv) > 1:
+            instruction = ' '.join(sys.argv[1:])
+            agent.run(instruction)
+        else:
+            agent.run()
+            
+    except Exception as e:
+        print(f"💥 Fatal error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
