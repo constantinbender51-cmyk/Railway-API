@@ -248,5 +248,5 @@ if __name__ == "__main__":
     import sys
     
     agent = SimpleCodingAgent()
-    instruction = sys.argv[1] if len(sys.argv) > 1 else "write a hello world program"
+    instruction = sys.argv[1] if len(sys.argv) > 1 else "write a program that fetches the current weekday and time and tells an appropriate uplifting comment"
     agent.run(instruction)
