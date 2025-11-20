@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simplified DeepSeek Coding Agent
+Simplified DeepSeek Coding Agent with Full Codebase Context
 """
 
 import os
@@ -21,45 +21,88 @@ class SimpleCodingAgent:
         if not all([self.deepseek_api_key, self.github_token, self.github_username, self.github_repo]):
             raise ValueError("Missing required environment variables")
 
+    def get_entire_codebase(self) -> str:
+        """Get all files and their contents from the repository"""
+        headers = {
+            'Authorization': f'token {self.github_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        # Get repository contents recursively
+        url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/"
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code != 200:
+            return "Empty repository or cannot access files"
+        
+        codebase = []
+        items = response.json()
+        
+        for item in items:
+            if item['type'] == 'file':
+                file_url = item['url']
+                file_response = requests.get(file_url, headers=headers)
+                
+                if file_response.status_code == 200:
+                    file_data = file_response.json()
+                    if file_data.get('encoding') == 'base64':
+                        content = base64.b64decode(file_data['content']).decode('utf-8')
+                        codebase.append(f"--- {item['path']} ---\n{content}\n")
+        
+        return "\n".join(codebase) if codebase else "Empty repository"
+
     def call_deepseek(self, instruction: str) -> str:
-        """Call DeepSeek API and return response"""
+        """Call DeepSeek API with full codebase context"""
         headers = {
             'Authorization': f'Bearer {self.deepseek_api_key}',
             'Content-Type': 'application/json'
         }
         
+        # Get entire codebase
+        print("📁 Fetching codebase...")
+        codebase = self.get_entire_codebase()
+        
         prompt = f"""
-        Instruction: {instruction}
+        CURRENT CODEBASE:
+        {codebase}
         
-        Respond with JSON array of file operations. Available operations:
+        INSTRUCTION: {instruction}
         
-        - write: Create or overwrite file
-          {{"operation": "write", "file": "filename", "content": "full content"}}
+        Analyze the current codebase and respond with JSON array of file operations:
+        
+        Available operations:
+        - write: Create or overwrite entire file
+          {{"operation": "write", "file": "filename", "content": "full file content"}}
         
         - delete: Delete file  
           {{"operation": "delete", "file": "filename"}}
         
-        - insert: Insert content at specific line
+        - insert: Insert content at specific line number
           {{"operation": "insert", "file": "filename", "line": 5, "content": "code to insert"}}
         
-        - delete_from: Delete content starting from line
+        - delete_from: Delete specific content starting from line
           {{"operation": "delete_from", "file": "filename", "line": 10, "content": "content to delete"}}
         
         Return ONLY JSON array. Example:
         [
-            {{"operation": "write", "file": "hello.py", "content": "print('Hello World!')"}}
+            {{"operation": "write", "file": "hello.py", "content": "print('Hello World!')"}},
+            {{"operation": "insert", "file": "main.py", "line": 3, "content": "import os"}}
         ]
+        
+        Base your operations on the current codebase above.
         """
         
         payload = {
             'model': 'deepseek-coder',
             'messages': [
-                {'role': 'system', 'content': 'Respond ONLY with JSON array of file operations. No other text.'},
+                {'role': 'system', 'content': 'Analyze the codebase and respond ONLY with JSON array of file operations. No other text.'},
                 {'role': 'user', 'content': prompt}
             ],
-            'temperature': 0.1
+            'temperature': 0.1,
+            'max_tokens': 4000
         }
         
+        print("🤖 Calling DeepSeek with codebase context...")
         response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload)
         response.raise_for_status()
         return response.json()['choices'][0]['message']['content']
@@ -89,7 +132,7 @@ class SimpleCodingAgent:
             file_data = response.json()
             content = base64.b64decode(file_data['content']).decode('utf-8')
             return content, file_data['sha']
-        return "", None
+        return None, None
 
     def apply_instruction(self, instruction: dict):
         """Apply a single file operation to GitHub"""
@@ -111,7 +154,6 @@ class SimpleCodingAgent:
             return f"Written {file}" if response.status_code in [200, 201] else f"Failed to write {file}"
 
         elif op == 'delete':
-            # Get current file to obtain SHA
             current_content, sha = self.get_file_content(file)
             if not sha:
                 return f"Cannot delete {file}: file not found"
@@ -127,7 +169,6 @@ class SimpleCodingAgent:
             line = instruction['line']
             content_to_insert = instruction['content']
             
-            # Get current file content
             current_content, sha = self.get_file_content(file)
             if current_content is None:
                 # File doesn't exist, create it with the content
@@ -138,7 +179,6 @@ class SimpleCodingAgent:
                 response = requests.put(url, headers=headers, json=payload)
                 return f"Created {file} with insert" if response.status_code in [200, 201] else f"Failed to create {file}"
             
-            # Insert at specified line
             lines = current_content.split('\n')
             if line < 1 or line > len(lines) + 1:
                 return f"Line {line} out of range for {file}"
@@ -158,20 +198,16 @@ class SimpleCodingAgent:
             line = instruction['line']
             content_to_delete = instruction['content']
             
-            # Get current file content
             current_content, sha = self.get_file_content(file)
             if not current_content:
                 return f"Cannot delete from {file}: file not found"
             
-            # Find and delete the content starting from line
             lines = current_content.split('\n')
             if line < 1 or line > len(lines):
                 return f"Line {line} out of range for {file}"
             
-            # Delete the specified content starting from the line
             target_line_content = lines[line - 1] if line - 1 < len(lines) else ""
             if content_to_delete in target_line_content:
-                # Remove the line containing the content
                 del lines[line - 1]
                 new_content = '\n'.join(lines)
                 
@@ -188,12 +224,11 @@ class SimpleCodingAgent:
         else:
             return f"Unknown operation: {op}"
 
-    def run(self, instruction: str = "write a hello world program"):
+    def run(self, instruction: str = "write a program that fetches the current weekday and time and tells an appropriate uplifting comment"):
         """Main execution flow"""
         print(f"📝 Instruction: {instruction}")
         
-        # Prompt DeepSeek
-        print("🤖 Calling DeepSeek...")
+        # Prompt DeepSeek with codebase context
         response = self.call_deepseek(instruction)
         
         # Parse response
