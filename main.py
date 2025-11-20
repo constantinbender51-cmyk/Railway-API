@@ -226,7 +226,7 @@ class RailwayQuerySweeper:
                     }
                 }
                 """,
-                "variables": {"projectId: PROJECT_ID}
+                "variables": {"projectId": PROJECT_ID}
             },
             {
                 "name": "Get deployment with all log types",
@@ -384,12 +384,12 @@ class RailwayQuerySweeper:
             self.results.append(result)
             
             if result['success'] and result['data_present']:
-                print(f"  ✅ SUCCESS - Found data")
+                print(f"  SUCCESS - Found data")
                 successful_queries += 1
             elif result['success']:
-                print(f"  ⚠️  SUCCESS - But no data returned")
+                print(f"  SUCCESS - But no data returned")
             else:
-                print(f"  ❌ FAILED - Status: {result['status_code']}, Errors: {len(result['errors'])}")
+                print(f"  FAILED - Status: {result['status_code']}, Errors: {len(result['errors'])}")
         
         print("\n" + "=" * 80)
         print(f"SWEEP COMPLETE: {successful_queries}/{total_queries} queries successful")
@@ -401,42 +401,42 @@ class RailwayQuerySweeper:
         print("=" * 80)
         
         for result in self.results:
-            print(f"\n📋 {result['name']}")
-            print(f"   Status: {'✅ SUCCESS' if result['success'] else '❌ FAILED'}")
-            print(f"   HTTP Status: {result['status_code']}")
-            print(f"   Data Present: {'Yes' if result['data_present'] else 'No'}")
+            print(f"\nQUERY: {result['name']}")
+            print(f"  Status: {'SUCCESS' if result['success'] else 'FAILED'}")
+            print(f"  HTTP Status: {result['status_code']}")
+            print(f"  Data Present: {'Yes' if result['data_present'] else 'No'}")
             
             if result['errors']:
-                print(f"   Errors: {len(result['errors'])}")
+                print(f"  Errors: {len(result['errors'])}")
                 for error in result['errors'][:2]:  # Show first 2 errors
                     if isinstance(error, dict):
-                        print(f"     - {error.get('message', 'Unknown error')}")
+                        print(f"    - {error.get('message', 'Unknown error')}")
                     else:
-                        print(f"     - {error}")
+                        print(f"    - {error}")
             
             if result.get('data_sample'):
-                print(f"   Data Sample:")
+                print(f"  Data Sample:")
                 sample_str = json.dumps(result['data_sample'], indent=2)
                 # Limit sample output
                 lines = sample_str.split('\n')
                 for line in lines[:10]:  # Show first 10 lines
-                    print(f"     {line}")
+                    print(f"    {line}")
                 if len(lines) > 10:
-                    print(f"     ... (truncated)")
+                    print(f"    ... (truncated)")
 
     def print_working_queries(self):
         """Print only the successful queries"""
-        print("\n✅ WORKING QUERIES:")
+        print("\nWORKING QUERIES:")
         print("=" * 80)
         
         working = [r for r in self.results if r['success'] and r['data_present']]
         
         for result in working:
-            print(f"\n🔧 {result['name']}")
+            print(f"\nQUERY: {result['name']}")
             if result.get('data_sample'):
                 # Show what data is available
                 data_keys = list(result['data_sample'].keys())
-                print(f"   Available data: {', '.join(data_keys)}")
+                print(f"  Available data: {', '.join(data_keys)}")
 
 def main():
     sweeper = RailwayQuerySweeper(RAILWAY_TOKEN)
