@@ -6,7 +6,6 @@ Script to retrieve and display logs of the most recent Railway deployment.
 import os
 import requests
 import sys
-import json
 
 # Configuration
 RAILWAY_API_BASE = "https://backboard.railway.app/graphql/v2"
@@ -36,7 +35,6 @@ class RailwayDeploymentMonitor:
             payload["variables"] = variables
 
         try:
-            print(f"Making GraphQL request to: {RAILWAY_API_BASE}")
             response = requests.post(
                 RAILWAY_API_BASE,
                 json=payload,
@@ -44,19 +42,16 @@ class RailwayDeploymentMonitor:
                 timeout=30
             )
             
-            print(f"Response status: {response.status_code}")
-            
             if response.status_code != 200:
-                print(f"Error response: {response.text}")
+                print(f"HTTP Error {response.status_code}: {response.text}")
                 return {}
                 
             result = response.json()
             
-            # Check for GraphQL errors
             if "errors" in result:
-                print("GraphQL errors found:")
+                print("GraphQL Errors:")
                 for error in result["errors"]:
-                    print(f"  - {error}")
+                    print(f"  - {error.get('message', 'Unknown error')}")
                 return {}
                 
             return result
@@ -67,64 +62,114 @@ class RailwayDeploymentMonitor:
 
     def get_latest_deployment(self, project_id: str) -> dict:
         """Get the latest deployment for a project"""
-        query = """
-        query GetDeployments($projectId: ID!) {
-            deployments(projectId: $projectId, limit: 1) {
-                nodes {
-                    id
-                    status
-                    createdAt
-                    environment {
-                        name
+        # Try multiple query variations
+        queries = [
+            # Try the most common Railway GraphQL schema
+            """
+            query GetDeployments($projectId: String!) {
+                deployments(input: {projectId: $projectId}, first: 1) {
+                    edges {
+                        node {
+                            id
+                            status
+                            createdAt
+                        }
                     }
                 }
             }
-        }
-        """
-        variables = {"projectId": project_id}
-        result = self.make_graphql_request(query, variables)
-        if not result:
-            return None
+            """,
+            # Alternative query
+            """
+            query GetDeployments($projectId: String!) {
+                project(id: $projectId) {
+                    deployments(first: 1) {
+                        edges {
+                            node {
+                                id
+                                status
+                                createdAt
+                            }
+                        }
+                    }
+                }
+            }
+            """
+        ]
         
-        deployments = result.get("data", {}).get("deployments", {}).get("nodes", [])
-        if not deployments:
-            print("No deployments found in response")
-            return None
+        for i, query in enumerate(queries):
+            print(f"Trying query variation {i + 1}...")
+            variables = {"projectId": project_id}
+            result = self.make_graphql_request(query, variables)
             
-        deployment = deployments[0]
-        return {
-            "id": deployment["id"], 
-            "status": deployment["status"], 
-            "createdAt": deployment["createdAt"],
-            "environment": deployment["environment"]["name"] if deployment["environment"] else "Unknown"
-        }
+            if result:
+                # Parse first query format
+                if "deployments" in result.get("data", {}):
+                    deployments = result["data"]["deployments"]["edges"]
+                    if deployments:
+                        deployment = deployments[0]["node"]
+                        return {
+                            "id": deployment["id"], 
+                            "status": deployment["status"], 
+                            "createdAt": deployment["createdAt"]
+                        }
+                
+                # Parse second query format  
+                if "project" in result.get("data", {}):
+                    deployments = result["data"]["project"]["deployments"]["edges"]
+                    if deployments:
+                        deployment = deployments[0]["node"]
+                        return {
+                            "id": deployment["id"], 
+                            "status": deployment["status"], 
+                            "createdAt": deployment["createdAt"]
+                        }
+        
+        return None
 
     def get_deployment_logs(self, deployment_id: str) -> list:
         """Get logs for a deployment"""
-        query = """
-        query GetDeploymentLogs($deploymentId: ID!) {
-            deployment(id: $deploymentId) {
-                logs {
-                    timestamp
-                    message
-                    level
+        # Try multiple query variations for logs
+        queries = [
+            """
+            query GetDeploymentLogs($deploymentId: String!) {
+                deployment(id: $deploymentId) {
+                    deploymentsLogs {
+                        timestamp
+                        message
+                        level
+                    }
                 }
             }
-        }
-        """
-        variables = {"deploymentId": deployment_id}
-        result = self.make_graphql_request(query, variables)
-        if not result:
-            return []
+            """,
+            """
+            query GetDeploymentLogs($deploymentId: String!) {
+                deployment(id: $deploymentId) {
+                    logs {
+                        timestamp
+                        message
+                        level
+                    }
+                }
+            }
+            """
+        ]
+        
+        for i, query in enumerate(queries):
+            print(f"Trying logs query variation {i + 1}...")
+            variables = {"deploymentId": deployment_id}
+            result = self.make_graphql_request(query, variables)
             
-        deployment = result.get("data", {}).get("deployment", {})
-        if not deployment:
-            print("No deployment data found in response")
-            return []
-            
-        logs = deployment.get("logs", [])
-        print(f"Retrieved {len(logs)} log entries")
-        return sorted(logs, key=lambda x: x["timestamp"])
+            if result:
+                deployment = result.get("data", {}).get("deployment", {})
+                if deployment:
+                    # Try different log field names
+                    for field_name in ["deploymentsLogs", "logs"]:
+                        logs = deployment.get(field_name, [])
+                        if logs:
+                            print(f"Retrieved {len(logs)} log entries using field '{field_name}'")
+                            return sorted(logs, key=lambda x: x["timestamp"])
+        
+        return []
 
 def main():
     monitor = RailwayDeploymentMonitor(RAILWAY_TOKEN)
@@ -141,7 +186,6 @@ def main():
     print(f"\nLatest Deployment:")
     print(f"ID: {deployment['id']}")
     print(f"Status: {deployment['status']}")
-    print(f"Environment: {deployment['environment']}")
     print(f"Created: {deployment['createdAt']}")
     
     print(f"\nFetching logs for deployment: {deployment['id']}")
