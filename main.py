@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DeepSeek Coding Agent Script
-Applies changes directly to GitHub via API
+Handles empty repositories and applies changes directly to GitHub
 """
 
 import os
@@ -21,6 +21,7 @@ class DeepSeekCodingAgent:
         self.load_environment_variables()
         self.repo_content = ""
         self.current_files = {}
+        self.is_empty_repo = False
         
     def load_environment_variables(self):
         """Load required environment variables"""
@@ -96,49 +97,59 @@ class DeepSeekCodingAgent:
             raise Exception(f"GitHub API validation failed: {e}")
     
     def get_repo_structure(self):
-        """Get the current repository structure and content"""
+        """Get the current repository structure and content - handles empty repos"""
         try:
             headers = {
                 'Authorization': f'token {self.github_token}',
                 'Accept': 'application/vnd.github.v3+json'
             }
             
-            # Get default branch first
+            # Get repository info first
             repo_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}"
             repo_response = requests.get(repo_url, headers=headers)
             repo_response.raise_for_status()
-            default_branch = repo_response.json().get('default_branch', 'main')
+            repo_data = repo_response.json()
             
-            # Get repository contents recursively
-            contents_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/trees/{default_branch}?recursive=1"
+            default_branch = repo_data.get('default_branch', 'main')
+            is_empty = repo_data.get('size', 0) == 0
+            
+            if is_empty:
+                print("📭 Repository is empty (no commits yet)")
+                self.is_empty_repo = True
+                self.repo_content = "Empty repository - no files yet"
+                self.current_files = {}
+                return self.repo_content
+            
+            # Try to get repository contents using the contents API (works for non-empty repos)
+            contents_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/"
             contents_response = requests.get(contents_url, headers=headers)
-            contents_response.raise_for_status()
             
-            tree_data = contents_response.json()
             files = {}
             
-            for item in tree_data.get('tree', []):
-                if item['type'] == 'blob':  # Only files
-                    file_path = item['path']
-                    
-                    # Get file content
-                    file_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/{file_path}"
-                    file_response = requests.get(file_url, headers=headers)
-                    
-                    if file_response.status_code == 200:
-                        file_data = file_response.json()
-                        if file_data.get('encoding') == 'base64':
-                            content = base64.b64decode(file_data['content']).decode('utf-8')
-                            files[file_path] = content
+            if contents_response.status_code == 200:
+                contents_data = contents_response.json()
+                for item in contents_data:
+                    if item['type'] == 'file':
+                        file_path = item['path']
+                        file_response = requests.get(item['url'], headers=headers)
+                        if file_response.status_code == 200:
+                            file_data = file_response.json()
+                            if file_data.get('encoding') == 'base64':
+                                content = base64.b64decode(file_data['content']).decode('utf-8')
+                                files[file_path] = content
             
             self.current_files = files
+            self.is_empty_repo = False
             
-            structure_info = f"Files: {', '.join(files.keys()) if files else 'Empty repository'}"
+            structure_info = f"Files: {', '.join(files.keys()) if files else 'Repository exists but no accessible files'}"
             self.repo_content = structure_info
             return self.repo_content
             
         except requests.exceptions.RequestException as e:
-            raise Exception(f"Failed to fetch repository structure: {e}")
+            print(f"⚠️  Could not fetch repository structure: {e}")
+            self.repo_content = "Unable to fetch repository structure"
+            self.current_files = {}
+            return self.repo_content
     
     def call_deepseek_api(self, instruction: str) -> str:
         """Call DeepSeek API with the instruction"""
@@ -148,8 +159,10 @@ class DeepSeekCodingAgent:
                 'Content-Type': 'application/json'
             }
             
+            repo_context = "Empty repository - creating initial files" if self.is_empty_repo else self.repo_content
+            
             prompt = f"""
-            Current repository files: {list(self.current_files.keys())}
+            Current repository status: {repo_context}
             
             Instruction: {instruction}
             
@@ -164,10 +177,10 @@ class DeepSeekCodingAgent:
             For deleting files:
             {{"operation": "delete", "file": "filename.ext"}}
             
-            Return a JSON array of operations. Example:
+            Return a JSON array of operations. Example for empty repository:
             [
                 {{"operation": "create", "file": "hello.py", "content": "print('Hello World!')"}},
-                {{"operation": "update", "file": "README.md", "content": "# Updated Readme"}}
+                {{"operation": "create", "file": "README.md", "content": "# Hello World Project"}}
             ]
             
             Important: 
@@ -226,11 +239,115 @@ class DeepSeekCodingAgent:
             print(f"Raw response that failed to parse: {response}")
             raise Exception(f"Failed to parse JSON instructions: {e}")
     
+    def create_initial_commit(self, instructions: List[Dict[str, Any]]):
+        """Create initial commit for empty repository"""
+        try:
+            headers = {
+                'Authorization': f'token {self.github_token}',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+            
+            # Create blobs for each file
+            blobs = {}
+            for instruction in instructions:
+                if instruction['operation'] in ['create', 'update']:
+                    filename = instruction['file']
+                    content = instruction['content']
+                    
+                    # Create blob
+                    blob_payload = {
+                        'content': content,
+                        'encoding': 'utf-8'
+                    }
+                    blob_response = requests.post(
+                        f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/blobs",
+                        headers=headers,
+                        json=blob_payload
+                    )
+                    blob_response.raise_for_status()
+                    blobs[filename] = blob_response.json()['sha']
+            
+            # Create tree
+            tree_entries = []
+            for filename, blob_sha in blobs.items():
+                tree_entries.append({
+                    'path': filename,
+                    'mode': '100644',
+                    'type': 'blob',
+                    'sha': blob_sha
+                })
+            
+            tree_payload = {
+                'tree': tree_entries
+            }
+            tree_response = requests.post(
+                f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/trees",
+                headers=headers,
+                json=tree_payload
+            )
+            tree_response.raise_for_status()
+            tree_sha = tree_response.json()['sha']
+            
+            # Get the default branch reference (might not exist for empty repo)
+            default_branch = 'main'
+            ref_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/refs/heads/{default_branch}"
+            ref_response = requests.get(ref_url, headers=headers)
+            
+            parent_sha = None
+            if ref_response.status_code == 200:
+                # Branch exists, get the commit SHA
+                parent_sha = ref_response.json()['object']['sha']
+            
+            # Create commit
+            commit_payload = {
+                'message': 'Initial commit: Hello World program by DeepSeek Coding Agent',
+                'tree': tree_sha
+            }
+            if parent_sha:
+                commit_payload['parents'] = [parent_sha]
+            
+            commit_response = requests.post(
+                f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/commits",
+                headers=headers,
+                json=commit_payload
+            )
+            commit_response.raise_for_status()
+            commit_sha = commit_response.json()['sha']
+            
+            # Create or update branch reference
+            ref_payload = {
+                'sha': commit_sha
+            }
+            
+            if ref_response.status_code == 404:
+                # Create new reference
+                ref_response = requests.post(
+                    f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/refs",
+                    headers=headers,
+                    json={'ref': f'refs/heads/{default_branch}', 'sha': commit_sha}
+                )
+            else:
+                # Update existing reference
+                ref_response = requests.patch(ref_url, headers=headers, json=ref_payload)
+            
+            ref_response.raise_for_status()
+            
+            applied_operations = [f"Created file: {filename}" for filename in blobs.keys()]
+            applied_operations.append("✅ Successfully created initial commit on GitHub")
+            return applied_operations
+            
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to create initial commit: {e}")
+    
     def apply_operations_to_github(self, instructions: List[Dict[str, Any]]):
         """Apply file operations directly to GitHub"""
+        if self.is_empty_repo:
+            print("🆕 Creating initial commit for empty repository...")
+            return self.create_initial_commit(instructions)
+        
+        # Existing logic for non-empty repositories
         applied_operations = []
         
-        # Get the latest commit SHA and default branch
         headers = {
             'Authorization': f'token {self.github_token}',
             'Accept': 'application/vnd.github.v3+json'
@@ -241,19 +358,16 @@ class DeepSeekCodingAgent:
         repo_response.raise_for_status()
         default_branch = repo_response.json().get('default_branch', 'main')
         
-        # Get the latest commit SHA
         branch_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/branches/{default_branch}"
         branch_response = requests.get(branch_url, headers=headers)
         branch_response.raise_for_status()
         latest_commit_sha = branch_response.json()['commit']['sha']
         
-        # Get the current tree SHA
         commit_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/commits/{latest_commit_sha}"
         commit_response = requests.get(commit_url, headers=headers)
         commit_response.raise_for_status()
         base_tree_sha = commit_response.json()['tree']['sha']
         
-        # Process each operation
         tree_entries = []
         
         for instruction in instructions:
@@ -275,7 +389,6 @@ class DeepSeekCodingAgent:
                     
                 elif op_type == 'update':
                     content = instruction['content']
-                    # First, get the current file SHA to update it
                     file_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/{filename}"
                     file_response = requests.get(file_url, headers=headers)
                     
@@ -286,11 +399,10 @@ class DeepSeekCodingAgent:
                             'mode': '100644',
                             'type': 'blob',
                             'content': content,
-                            'sha': file_data['sha']  # Include SHA for updates
+                            'sha': file_data['sha']
                         })
                         applied_operations.append(f"Updated file: {filename}")
                     else:
-                        # File doesn't exist, create it instead
                         tree_entries.append({
                             'path': filename,
                             'mode': '100644',
@@ -300,7 +412,6 @@ class DeepSeekCodingAgent:
                         applied_operations.append(f"Created file (was missing): {filename}")
                         
                 elif op_type == 'delete':
-                    # For deletion, we need to get the file SHA first
                     file_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/contents/{filename}"
                     file_response = requests.get(file_url, headers=headers)
                     
@@ -310,7 +421,7 @@ class DeepSeekCodingAgent:
                             'path': filename,
                             'mode': '100644',
                             'type': 'blob',
-                            'sha': None  # Setting SHA to None deletes the file
+                            'sha': None
                         })
                         applied_operations.append(f"Deleted file: {filename}")
                     else:
@@ -326,7 +437,6 @@ class DeepSeekCodingAgent:
             print("ℹ️  No changes to apply")
             return applied_operations
         
-        # Create new tree
         tree_url = f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/trees"
         tree_payload = {
             'base_tree': base_tree_sha,
@@ -336,7 +446,6 @@ class DeepSeekCodingAgent:
         tree_response.raise_for_status()
         new_tree_sha = tree_response.json()['sha']
         
-        # Create new commit
         commit_payload = {
             'message': 'Auto-commit: Changes applied by DeepSeek Coding Agent',
             'tree': new_tree_sha,
@@ -350,83 +459,8 @@ class DeepSeekCodingAgent:
         commit_response.raise_for_status()
         new_commit_sha = commit_response.json()['sha']
         
-        # Update branch reference
         ref_payload = {
             'sha': new_commit_sha
         }
         ref_response = requests.patch(
             f"{GITHUB_API_URL}/repos/{self.github_username}/{self.github_repo}/git/refs/heads/{default_branch}",
-            headers=headers,
-            json=ref_payload
-        )
-        ref_response.raise_for_status()
-        
-        applied_operations.append(f"✅ Successfully pushed {len([x for x in tree_entries if x.get('sha') is not None])} changes to GitHub")
-        return applied_operations
-    
-    def run(self, instruction: str = None):
-        """Main execution method"""
-        try:
-            print("🚀 Starting DeepSeek Coding Agent...")
-            print("=" * 50)
-            
-            # Check network first
-            self.check_network_connectivity()
-            print("✅ Network connectivity confirmed")
-            
-            # Validate GitHub token
-            self.validate_github_token()
-            
-            # Use default instruction if none provided
-            if instruction is None:
-                instruction = DEFAULT_INSTRUCTION
-                print(f"📝 Using default instruction: '{instruction}'")
-            else:
-                print(f"📝 Using instruction: '{instruction}'")
-            
-            # Get repository structure
-            print("📁 Fetching repository structure...")
-            repo_structure = self.get_repo_structure()
-            print(f"📊 Repository: {repo_structure}")
-            
-            # Call DeepSeek API
-            print("🤖 Calling DeepSeek API...")
-            deepseek_response = self.call_deepseek_api(instruction)
-            
-            print("📝 Parsing instructions...")
-            instructions = self.parse_instructions(deepseek_response)
-            print(f"📋 Parsed {len(instructions)} operation(s)")
-            
-            # Apply operations directly to GitHub
-            print("⚡ Applying operations directly to GitHub...")
-            applied_ops = self.apply_operations_to_github(instructions)
-            
-            print("📊 Operation Results:")
-            for op in applied_ops:
-                print(f"  {op}")
-            
-            print("🎉 All operations completed successfully!")
-            
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            raise
-
-def main():
-    """Main function"""
-    import sys
-    
-    try:
-        agent = DeepSeekCodingAgent()
-        
-        if len(sys.argv) > 1:
-            instruction = ' '.join(sys.argv[1:])
-            agent.run(instruction)
-        else:
-            agent.run()
-            
-    except Exception as e:
-        print(f"💥 Fatal error: {e}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
