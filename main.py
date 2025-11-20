@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple script to fetch latest Railway deployment logs.
+Simple script to fetch both deployment logs and build logs.
 """
 
 import os
@@ -31,9 +31,12 @@ deployments_query = """
 
 response = requests.post(RAILWAY_API, json={"query": deployments_query}, headers=headers)
 deployment_id = response.json()["data"]["deployments"]["edges"][0]["node"]["id"]
+status = response.json()["data"]["deployments"]["edges"][0]["node"]["status"]
+
+print(f"Deployment: {deployment_id} ({status})")
 
 # Get deployment logs
-logs_query = """
+deployment_logs_query = """
 {
   deploymentLogs(deploymentId: "%s", limit: 500) {
     message
@@ -43,9 +46,27 @@ logs_query = """
 }
 """ % deployment_id
 
-response = requests.post(RAILWAY_API, json={"query": logs_query}, headers=headers)
-logs = response.json()["data"]["deploymentLogs"]
+response = requests.post(RAILWAY_API, json={"query": deployment_logs_query}, headers=headers)
+deployment_logs = response.json()["data"]["deploymentLogs"]
 
-# Print logs
-for log in sorted(logs, key=lambda x: x["timestamp"]):
+print(f"\n=== DEPLOYMENT LOGS ({len(deployment_logs)} entries) ===")
+for log in sorted(deployment_logs, key=lambda x: x["timestamp"]):
+    print(f"{log['timestamp']} [{log['severity']}] {log['message']}")
+
+# Get build logs
+build_logs_query = """
+{
+  buildLogs(deploymentId: "%s", limit: 500) {
+    message
+    severity
+    timestamp
+  }
+}
+""" % deployment_id
+
+response = requests.post(RAILWAY_API, json={"query": build_logs_query}, headers=headers)
+build_logs = response.json()["data"]["buildLogs"]
+
+print(f"\n=== BUILD LOGS ({len(build_logs)} entries) ===")
+for log in sorted(build_logs, key=lambda x: x["timestamp"]):
     print(f"{log['timestamp']} [{log['severity']}] {log['message']}")
