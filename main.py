@@ -1,172 +1,186 @@
 #!/usr/bin/env python3
 """
-Script to fetch deployment logs using Railway REST API.
+Script to fetch Railway deployment logs using the deploymentLogs query.
+Uses only environment variables - no user input.
 """
 
 import os
 import requests
 import sys
+from datetime import datetime
 
-# Configuration
-RAILWAY_REST_BASE = "https://api.railway.app"
+RAILWAY_API_BASE = "https://backboard.railway.app/graphql/v2"
 RAILWAY_TOKEN = os.environ.get("RAILWAY_API_TOKEN")
 PROJECT_ID = os.environ.get("PROJECT_ID")
+DEPLOYMENT_ID = os.environ.get("DEPLOYMENT_ID")  # Optional: specific deployment ID
 
-if not RAILWAY_TOKEN:
-    print("Error: RAILWAY_API_TOKEN environment variable is not set")
+if not RAILWAY_TOKEN or not PROJECT_ID:
+    print("Error: RAILWAY_API_TOKEN and PROJECT_ID environment variables are required")
     sys.exit(1)
 
-if not PROJECT_ID:
-    print("Error: PROJECT_ID environment variable is not set")
-    sys.exit(1)
+headers = {
+    "Authorization": f"Bearer {RAILWAY_TOKEN}",
+    "Content-Type": "application/json",
+}
 
-class RailwayRestClient:
-    def __init__(self, api_token: str):
-        self.api_token = api_token
-        self.headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json",
+def get_deployments(limit=10):
+    """Get deployments to find the latest deployment ID"""
+    query = """
+    query GetDeployments($projectId: String!, $limit: Int!) {
+        deployments(input: {projectId: $projectId}, first: $limit) {
+            edges {
+                node {
+                    id
+                    status
+                    createdAt
+                }
+            }
         }
-
-    def get_deployments(self):
-        """Get deployments for a project using REST API"""
-        url = f"{RAILWAY_REST_BASE}/v1/projects/{PROJECT_ID}/deployments"
+    }
+    """
+    
+    variables = {
+        "projectId": PROJECT_ID,
+        "limit": limit
+    }
+    
+    try:
+        response = requests.post(
+            RAILWAY_API_BASE,
+            json={"query": query, "variables": variables},
+            headers=headers,
+            timeout=30
+        )
         
-        try:
-            response = requests.get(url, headers=self.headers, timeout=30)
-            print(f"GET {url} - Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"Error: {response.status_code} - {response.text}")
-                return None
-                
-        except requests.exceptions.RequestException as e:
-            print(f"Request failed: {e}")
-            return None
-
-    def get_deployment_logs(self, deployment_id: str):
-        """Get logs for a specific deployment using REST API"""
-        # Try different REST endpoints for logs
-        endpoints = [
-            f"/v1/deployments/{deployment_id}/logs",
-            f"/v1/deployments/{deployment_id}/build-logs",
-            f"/v1/projects/{PROJECT_ID}/deployments/{deployment_id}/logs",
-            f"/v1/projects/{PROJECT_ID}/deployments/{deployment_id}/build-logs",
-        ]
+        if response.status_code == 200:
+            result = response.json()
+            if "errors" not in result:
+                deployments = result.get("data", {}).get("deployments", {}).get("edges", [])
+                return [deployment["node"] for deployment in deployments]
         
-        for endpoint in endpoints:
-            url = f"{RAILWAY_REST_BASE}{endpoint}"
-            print(f"Trying endpoint: {endpoint}")
-            
-            try:
-                response = requests.get(url, headers=self.headers, timeout=30)
-                print(f"GET {url} - Status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code != 404:
-                    print(f"Error {response.status_code}: {response.text}")
-                    
-            except requests.exceptions.RequestException as e:
-                print(f"Request failed: {e}")
-                
-        return None
-
-    def get_project_info(self):
-        """Get project information"""
-        url = f"{RAILWAY_REST_BASE}/v1/projects/{PROJECT_ID}"
+        print(f"Error getting deployments: {response.status_code}")
+        return []
         
-        try:
-            response = requests.get(url, headers=self.headers, timeout=30)
-            print(f"GET {url} - Status: {response.status_code}")
+    except Exception as e:
+        print(f"Request failed: {e}")
+        return []
+
+def get_deployment_logs(deployment_id, limit=500):
+    """Get logs for a specific deployment"""
+    query = """
+    query deploymentLogs($deploymentId: String!, $limit: Int) {
+      deploymentLogs(
+        deploymentId: $deploymentId
+        limit: $limit
+      ) {
+        __typename
+        message
+        severity
+        timestamp
+      }
+    }
+    """
+    
+    variables = {
+        "deploymentId": deployment_id,
+        "limit": limit
+    }
+    
+    try:
+        response = requests.post(
+            RAILWAY_API_BASE,
+            json={"query": query, "variables": variables},
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if "errors" in result:
+                print(f"GraphQL errors: {result['errors']}")
+                return []
             
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"Error: {response.status_code} - {response.text}")
-                return None
-                
-        except requests.exceptions.RequestException as e:
-            print(f"Request failed: {e}")
-            return None
+            logs = result.get("data", {}).get("deploymentLogs", [])
+            return logs
+        else:
+            print(f"Error response: {response.text}")
+            return []
+            
+    except Exception as e:
+        print(f"Logs request failed: {e}")
+        return []
+
+def format_timestamp(timestamp):
+    """Format ISO timestamp to readable format"""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        return timestamp
+
+def format_severity(severity):
+    """Format severity with emoji"""
+    if not severity:
+        return "⚪ UNKNOWN"
+    
+    severity = severity.lower()
+    if severity in ['error', 'err']:
+        return "🔴 ERROR"
+    elif severity in ['warning', 'warn']:
+        return "🟡 WARN" 
+    elif severity == 'info':
+        return "🔵 INFO"
+    elif severity == 'debug':
+        return "⚪ DEBUG"
+    else:
+        return f"⚪ {severity.upper()}"
 
 def main():
-    client = RailwayRestClient(RAILWAY_TOKEN)
+    print("🚄 Railway Deployment Logs")
+    print("=" * 60)
+    print(f"Project ID: {PROJECT_ID}")
     
-    print(f"Testing Railway REST API for project: {PROJECT_ID}")
-    print("=" * 70)
-    
-    # First, get project info to verify access
-    print("\n1. Getting project information...")
-    project_info = client.get_project_info()
-    if project_info:
-        print(f"Project Name: {project_info.get('name', 'Unknown')}")
-        print(f"Project Description: {project_info.get('description', 'None')}")
+    # Use specific deployment ID if provided, otherwise get latest
+    if DEPLOYMENT_ID:
+        print(f"Using specified deployment: {DEPLOYMENT_ID}")
+        deployment_id = DEPLOYMENT_ID
+        deployment_status = "SPECIFIED"
     else:
-        print("Failed to get project info")
-        return
-    
-    # Get deployments
-    print("\n2. Getting deployments...")
-    deployments = client.get_deployments()
-    
-    if not deployments:
-        print("No deployments found or failed to fetch deployments")
-        return
-    
-    print(f"Found {len(deployments)} deployments")
-    
-    # Show deployment list
-    print("\nDeployments:")
-    print("-" * 50)
-    for i, deployment in enumerate(deployments[:5]):  # Show first 5
-        deployment_id = deployment.get('id', 'Unknown')
-        status = deployment.get('status', 'Unknown')
-        created_at = deployment.get('createdAt', 'Unknown')
+        print("Getting latest deployment...")
+        deployments = get_deployments(limit=1)
         
-        print(f"{i + 1}. ID: {deployment_id}")
-        print(f"   Status: {status}")
-        print(f"   Created: {created_at}")
-    
-    # Try to get logs for the latest deployment
-    if deployments:
+        if not deployments:
+            print("❌ No deployments found")
+            return
+        
         latest_deployment = deployments[0]
-        deployment_id = latest_deployment.get('id')
+        deployment_id = latest_deployment['id']
+        deployment_status = latest_deployment.get('status', 'UNKNOWN')
+        print(f"Using latest deployment: {deployment_id}")
+        print(f"Deployment status: {deployment_status}")
+    
+    print("=" * 60)
+    
+    # Get deployment logs
+    print(f"\n📜 Fetching deployment logs...")
+    logs = get_deployment_logs(deployment_id, limit=500)
+    
+    if not logs:
+        print("❌ No logs found for this deployment")
+        return
+    
+    print(f"✅ Found {len(logs)} log entries")
+    print("=" * 80)
+    
+    # Display logs in chronological order
+    sorted_logs = sorted(logs, key=lambda x: x.get('timestamp', ''))
+    
+    for log in sorted_logs:
+        timestamp = format_timestamp(log.get('timestamp', 'Unknown'))
+        severity = format_severity(log.get('severity', 'info'))
+        message = log.get('message', '').strip()
         
-        print(f"\n3. Trying to get logs for latest deployment: {deployment_id}")
-        logs = client.get_deployment_logs(deployment_id)
-        
-        if logs:
-            print(f"\nSuccessfully retrieved logs!")
-            print("Logs structure:")
-            print(f"Type: {type(logs)}")
-            if isinstance(logs, dict):
-                print("Keys:", list(logs.keys()))
-                # Print the actual logs if they're in a readable format
-                if 'logs' in logs:
-                    print("\nLogs content:")
-                    if isinstance(logs['logs'], list):
-                        for log_entry in logs['logs'][:10]:  # Show first 10 entries
-                            print(f"  {log_entry}")
-                    else:
-                        print(logs['logs'])
-                elif 'buildLogs' in logs:
-                    print("\nBuild logs content:")
-                    if isinstance(logs['buildLogs'], list):
-                        for log_entry in logs['buildLogs'][:10]:
-                            print(f"  {log_entry}")
-                    else:
-                        print(logs['buildLogs'])
-            elif isinstance(logs, list):
-                print(f"Number of log entries: {len(logs)}")
-                for log_entry in logs[:10]:  # Show first 10 entries
-                    print(f"  {log_entry}")
-            else:
-                print(f"Raw logs: {logs}")
-        else:
-            print("No logs available via REST API")
+        print(f"{timestamp} [{severity}] {message}")
 
 if __name__ == "__main__":
     main()
