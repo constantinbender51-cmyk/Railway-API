@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Script to sweep all possible Railway deployment GraphQL queries and report success.
+Script to fetch deployment logs using Railway REST API.
 """
 
 import os
 import requests
 import sys
-import json
 
 # Configuration
-RAILWAY_API_BASE = "https://backboard.railway.app/graphql/v2"
+RAILWAY_REST_BASE = "https://api.railway.app"
 RAILWAY_TOKEN = os.environ.get("RAILWAY_API_TOKEN")
 PROJECT_ID = os.environ.get("PROJECT_ID")
 
@@ -21,428 +20,153 @@ if not PROJECT_ID:
     print("Error: PROJECT_ID environment variable is not set")
     sys.exit(1)
 
-class RailwayQuerySweeper:
+class RailwayRestClient:
     def __init__(self, api_token: str):
         self.api_token = api_token
         self.headers = {
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json",
         }
-        self.results = []
 
-    def test_query(self, name: str, query: str, variables: dict = None) -> dict:
-        """Test a single GraphQL query and return results"""
-        payload = {"query": query}
-        if variables:
-            payload["variables"] = variables
-
+    def get_deployments(self):
+        """Get deployments for a project using REST API"""
+        url = f"{RAILWAY_REST_BASE}/v1/projects/{PROJECT_ID}/deployments"
+        
         try:
-            response = requests.post(
-                RAILWAY_API_BASE,
-                json=payload,
-                headers=self.headers,
-                timeout=30
-            )
-            
-            result = {
-                "name": name,
-                "status_code": response.status_code,
-                "success": False,
-                "data_present": False,
-                "errors": [],
-                "response_time": None
-            }
+            response = requests.get(url, headers=self.headers, timeout=30)
+            print(f"GET {url} - Status: {response.status_code}")
             
             if response.status_code == 200:
-                json_response = response.json()
-                result["success"] = True
+                return response.json()
+            else:
+                print(f"Error: {response.status_code} - {response.text}")
+                return None
                 
-                if "errors" in json_response:
-                    result["errors"] = json_response["errors"]
-                
-                if "data" in json_response and json_response["data"]:
-                    result["data_present"] = True
-                    # Store a sample of the data (first few items)
-                    result["data_sample"] = self._sample_data(json_response["data"])
-            
-            return result
-            
         except requests.exceptions.RequestException as e:
-            return {
-                "name": name,
-                "status_code": None,
-                "success": False,
-                "data_present": False,
-                "errors": [str(e)],
-                "response_time": None
-            }
+            print(f"Request failed: {e}")
+            return None
 
-    def _sample_data(self, data: dict, max_items: int = 3) -> dict:
-        """Create a sample of the data for display"""
-        sample = {}
-        for key, value in data.items():
-            if isinstance(value, list):
-                sample[key] = value[:max_items]
-            elif isinstance(value, dict):
-                sample[key] = self._sample_data(value, max_items)
-            else:
-                sample[key] = value
-        return sample
-
-    def run_sweep(self):
-        """Run all deployment-related queries"""
-        queries = [
-            # Basic deployment queries
-            {
-                "name": "Get deployments list",
-                "query": """
-                query GetDeployments($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 5) {
-                        edges {
-                            node {
-                                id
-                                status
-                                createdAt
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            {
-                "name": "Get deployments with all fields",
-                "query": """
-                query GetDeploymentsFull($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 2) {
-                        edges {
-                            node {
-                                id
-                                status
-                                createdAt
-                                updatedAt
-                                meta
-                                environment {
-                                    id
-                                    name
-                                }
-                                project {
-                                    id
-                                    name
-                                }
-                                staticUrl
-                                url
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Single deployment queries
-            {
-                "name": "Get single deployment by ID",
-                "query": """
-                query GetDeployment($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 1) {
-                        edges {
-                            node {
-                                id
-                                status
-                                createdAt
-                                buildLogs {
-                                    timestamp
-                                    message
-                                    level
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Build logs queries
-            {
-                "name": "Get deployment with buildLogs",
-                "query": """
-                query GetDeploymentWithBuildLogs($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 1) {
-                        edges {
-                            node {
-                                id
-                                buildLogs {
-                                    timestamp
-                                    message
-                                    level
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            {
-                "name": "Get deployment build object",
-                "query": """
-                query GetDeploymentBuild($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 1) {
-                        edges {
-                            node {
-                                id
-                                build {
-                                    id
-                                    status
-                                    logs {
-                                        timestamp
-                                        message
-                                        level
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Logs queries (various types)
-            {
-                "name": "Get deployment logs",
-                "query": """
-                query GetDeploymentLogs($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 1) {
-                        edges {
-                            node {
-                                id
-                                deploymentsLogs {
-                                    timestamp
-                                    message
-                                    level
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            {
-                "name": "Get deployment with all log types",
-                "query": """
-                query GetAllLogs($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 1) {
-                        edges {
-                            node {
-                                id
-                                buildLogs {
-                                    timestamp
-                                    message
-                                    level
-                                }
-                                deploymentsLogs {
-                                    timestamp
-                                    message
-                                    level
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Project-based queries
-            {
-                "name": "Get project with deployments",
-                "query": """
-                query GetProjectWithDeployments($projectId: ID!) {
-                    project(id: $projectId) {
-                        id
-                        name
-                        deployments(first: 3) {
-                            edges {
-                                node {
-                                    id
-                                    status
-                                    createdAt
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Service-based queries
-            {
-                "name": "Get services with deployments",
-                "query": """
-                query GetServices($projectId: String!) {
-                    services(projectId: $projectId) {
-                        id
-                        name
-                        deployments(first: 2) {
-                            edges {
-                                node {
-                                    id
-                                    status
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Direct deployment by ID (need to get an ID first)
-            {
-                "name": "Get deployment by direct ID query",
-                "query": """
-                query GetDeploymentDirect($projectId: String!) {
-                    deployments(input: {projectId: $projectId}, first: 1) {
-                        edges {
-                            node {
-                                id
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Environment queries
-            {
-                "name": "Get environments with deployments",
-                "query": """
-                query GetEnvironments($projectId: String!) {
-                    environments(projectId: $projectId) {
-                        id
-                        name
-                        deployments(first: 2) {
-                            edges {
-                                node {
-                                    id
-                                    status
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Build-related queries
-            {
-                "name": "Get builds directly",
-                "query": """
-                query GetBuilds($projectId: String!) {
-                    builds(projectId: $projectId, first: 3) {
-                        edges {
-                            node {
-                                id
-                                status
-                                deployment {
-                                    id
-                                }
-                            }
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            },
-            # Railway specific queries
-            {
-                "name": "Get railway deployment status",
-                "query": """
-                query GetRailwayDeployment($projectId: String!) {
-                    railwayDeployment(projectId: $projectId) {
-                        id
-                        status
-                        logs {
-                            timestamp
-                            message
-                        }
-                    }
-                }
-                """,
-                "variables": {"projectId": PROJECT_ID}
-            }
+    def get_deployment_logs(self, deployment_id: str):
+        """Get logs for a specific deployment using REST API"""
+        # Try different REST endpoints for logs
+        endpoints = [
+            f"/v1/deployments/{deployment_id}/logs",
+            f"/v1/deployments/{deployment_id}/build-logs",
+            f"/v1/projects/{PROJECT_ID}/deployments/{deployment_id}/logs",
+            f"/v1/projects/{PROJECT_ID}/deployments/{deployment_id}/build-logs",
         ]
-
-        print(f"Running query sweep for project: {PROJECT_ID}")
-        print("=" * 80)
         
-        successful_queries = 0
-        total_queries = len(queries)
-        
-        for i, query_def in enumerate(queries):
-            print(f"Testing {i+1}/{total_queries}: {query_def['name']}...")
-            result = self.test_query(query_def['name'], query_def['query'], query_def.get('variables'))
-            self.results.append(result)
+        for endpoint in endpoints:
+            url = f"{RAILWAY_REST_BASE}{endpoint}"
+            print(f"Trying endpoint: {endpoint}")
             
-            if result['success'] and result['data_present']:
-                print(f"  SUCCESS - Found data")
-                successful_queries += 1
-            elif result['success']:
-                print(f"  SUCCESS - But no data returned")
+            try:
+                response = requests.get(url, headers=self.headers, timeout=30)
+                print(f"GET {url} - Status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code != 404:
+                    print(f"Error {response.status_code}: {response.text}")
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"Request failed: {e}")
+                
+        return None
+
+    def get_project_info(self):
+        """Get project information"""
+        url = f"{RAILWAY_REST_BASE}/v1/projects/{PROJECT_ID}"
+        
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+            print(f"GET {url} - Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                return response.json()
             else:
-                print(f"  FAILED - Status: {result['status_code']}, Errors: {len(result['errors'])}")
-        
-        print("\n" + "=" * 80)
-        print(f"SWEEP COMPLETE: {successful_queries}/{total_queries} queries successful")
-        print("=" * 80)
-
-    def print_detailed_results(self):
-        """Print detailed results of the sweep"""
-        print("\nDETAILED RESULTS:")
-        print("=" * 80)
-        
-        for result in self.results:
-            print(f"\nQUERY: {result['name']}")
-            print(f"  Status: {'SUCCESS' if result['success'] else 'FAILED'}")
-            print(f"  HTTP Status: {result['status_code']}")
-            print(f"  Data Present: {'Yes' if result['data_present'] else 'No'}")
-            
-            if result['errors']:
-                print(f"  Errors: {len(result['errors'])}")
-                for error in result['errors'][:2]:  # Show first 2 errors
-                    if isinstance(error, dict):
-                        print(f"    - {error.get('message', 'Unknown error')}")
-                    else:
-                        print(f"    - {error}")
-            
-            if result.get('data_sample'):
-                print(f"  Data Sample:")
-                sample_str = json.dumps(result['data_sample'], indent=2)
-                # Limit sample output
-                lines = sample_str.split('\n')
-                for line in lines[:10]:  # Show first 10 lines
-                    print(f"    {line}")
-                if len(lines) > 10:
-                    print(f"    ... (truncated)")
-
-    def print_working_queries(self):
-        """Print only the successful queries"""
-        print("\nWORKING QUERIES:")
-        print("=" * 80)
-        
-        working = [r for r in self.results if r['success'] and r['data_present']]
-        
-        for result in working:
-            print(f"\nQUERY: {result['name']}")
-            if result.get('data_sample'):
-                # Show what data is available
-                data_keys = list(result['data_sample'].keys())
-                print(f"  Available data: {', '.join(data_keys)}")
+                print(f"Error: {response.status_code} - {response.text}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return None
 
 def main():
-    sweeper = RailwayQuerySweeper(RAILWAY_TOKEN)
-    sweeper.run_sweep()
-    sweeper.print_detailed_results()
-    sweeper.print_working_queries()
+    client = RailwayRestClient(RAILWAY_TOKEN)
+    
+    print(f"Testing Railway REST API for project: {PROJECT_ID}")
+    print("=" * 70)
+    
+    # First, get project info to verify access
+    print("\n1. Getting project information...")
+    project_info = client.get_project_info()
+    if project_info:
+        print(f"Project Name: {project_info.get('name', 'Unknown')}")
+        print(f"Project Description: {project_info.get('description', 'None')}")
+    else:
+        print("Failed to get project info")
+        return
+    
+    # Get deployments
+    print("\n2. Getting deployments...")
+    deployments = client.get_deployments()
+    
+    if not deployments:
+        print("No deployments found or failed to fetch deployments")
+        return
+    
+    print(f"Found {len(deployments)} deployments")
+    
+    # Show deployment list
+    print("\nDeployments:")
+    print("-" * 50)
+    for i, deployment in enumerate(deployments[:5]):  # Show first 5
+        deployment_id = deployment.get('id', 'Unknown')
+        status = deployment.get('status', 'Unknown')
+        created_at = deployment.get('createdAt', 'Unknown')
+        
+        print(f"{i + 1}. ID: {deployment_id}")
+        print(f"   Status: {status}")
+        print(f"   Created: {created_at}")
+    
+    # Try to get logs for the latest deployment
+    if deployments:
+        latest_deployment = deployments[0]
+        deployment_id = latest_deployment.get('id')
+        
+        print(f"\n3. Trying to get logs for latest deployment: {deployment_id}")
+        logs = client.get_deployment_logs(deployment_id)
+        
+        if logs:
+            print(f"\nSuccessfully retrieved logs!")
+            print("Logs structure:")
+            print(f"Type: {type(logs)}")
+            if isinstance(logs, dict):
+                print("Keys:", list(logs.keys()))
+                # Print the actual logs if they're in a readable format
+                if 'logs' in logs:
+                    print("\nLogs content:")
+                    if isinstance(logs['logs'], list):
+                        for log_entry in logs['logs'][:10]:  # Show first 10 entries
+                            print(f"  {log_entry}")
+                    else:
+                        print(logs['logs'])
+                elif 'buildLogs' in logs:
+                    print("\nBuild logs content:")
+                    if isinstance(logs['buildLogs'], list):
+                        for log_entry in logs['buildLogs'][:10]:
+                            print(f"  {log_entry}")
+                    else:
+                        print(logs['buildLogs'])
+            elif isinstance(logs, list):
+                print(f"Number of log entries: {len(logs)}")
+                for log_entry in logs[:10]:  # Show first 10 entries
+                    print(f"  {log_entry}")
+            else:
+                print(f"Raw logs: {logs}")
+        else:
+            print("No logs available via REST API")
 
 if __name__ == "__main__":
     main()
