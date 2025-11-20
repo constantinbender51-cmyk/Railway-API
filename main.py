@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 # Configuration
 RAILWAY_API_BASE = "https://backboard.railway.app/graphql/v2"
 RAILWAY_TOKEN = os.environ.get("RAILWAY_API_TOKEN")
+PROJECT_ID = os.environ.get("PROJECT_ID")
 
 if not RAILWAY_TOKEN:
     print("Error: RAILWAY_API_TOKEN environment variable is not set")
@@ -217,6 +218,23 @@ def main():
             print(f"{i + 1}. {project['name']} ({project['id']})")
         return
     
+    # Check for PROJECT_ID environment variable first (highest priority)
+    if PROJECT_ID:
+        print(f"Using PROJECT_ID from environment: {PROJECT_ID}")
+        deployment = monitor.get_latest_deployment(PROJECT_ID)
+        if not deployment:
+            print("No deployments found for this project")
+            return
+        
+        print(f"Monitoring deployment: {deployment['id']}")
+        final_status = monitor.monitor_deployment(
+            deployment["id"],
+            args.poll_interval,
+            args.timeout
+        )
+        print(f"Deployment monitoring completed. Final status: {final_status}")
+        return
+    
     # If deployment ID is provided, monitor that specific deployment
     if args.deployment_id:
         print(f"Monitoring specific deployment: {args.deployment_id}")
@@ -228,13 +246,7 @@ def main():
         print(f"Deployment monitoring completed. Final status: {final_status}")
         return
     
-    # Get projects
-    projects = monitor.get_projects()
-    if not projects:
-        print("No projects found or failed to fetch projects")
-        return
-    
-    # If project ID is provided, monitor its latest deployment
+    # If project ID is provided via command line, monitor its latest deployment
     if args.project_id:
         deployment = monitor.get_latest_deployment(args.project_id)
         if not deployment:
@@ -248,6 +260,12 @@ def main():
             args.timeout
         )
         print(f"Deployment monitoring completed. Final status: {final_status}")
+        return
+    
+    # Get projects
+    projects = monitor.get_projects()
+    if not projects:
+        print("No projects found or failed to fetch projects")
         return
     
     # If project name is provided, find matching project
