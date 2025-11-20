@@ -8,6 +8,7 @@ import requests
 import time
 import sys
 import json
+import argparse
 from typing import Optional, Dict, Any
 
 # Configuration
@@ -191,7 +192,41 @@ class RailwayDeploymentMonitor:
             print(f"[{timestamp}] [{level}] {message}")
 
 def main():
+    parser = argparse.ArgumentParser(description='Monitor Railway deployments')
+    parser.add_argument('--project-id', help='Specific project ID to monitor')
+    parser.add_argument('--project-name', help='Specific project name to monitor (partial match)')
+    parser.add_argument('--deployment-id', help='Specific deployment ID to monitor')
+    parser.add_argument('--poll-interval', type=int, default=5, help='Polling interval in seconds')
+    parser.add_argument('--timeout', type=int, default=1800, help='Timeout in seconds')
+    parser.add_argument('--auto-select', action='store_true', help='Automatically select the first project')
+    parser.add_argument('--list-projects', action='store_true', help='List all projects and exit')
+    
+    args = parser.parse_args()
+    
     monitor = RailwayDeploymentMonitor(RAILWAY_TOKEN)
+    
+    # List projects and exit if requested
+    if args.list_projects:
+        projects = monitor.get_projects()
+        if not projects:
+            print("No projects found or failed to fetch projects")
+            return
+        
+        print("Available projects:")
+        for i, project in enumerate(projects):
+            print(f"{i + 1}. {project['name']} ({project['id']})")
+        return
+    
+    # If deployment ID is provided, monitor that specific deployment
+    if args.deployment_id:
+        print(f"Monitoring specific deployment: {args.deployment_id}")
+        final_status = monitor.monitor_deployment(
+            args.deployment_id, 
+            args.poll_interval, 
+            args.timeout
+        )
+        print(f"Deployment monitoring completed. Final status: {final_status}")
+        return
     
     # Get projects
     projects = monitor.get_projects()
@@ -199,25 +234,88 @@ def main():
         print("No projects found or failed to fetch projects")
         return
     
+    # If project ID is provided, monitor its latest deployment
+    if args.project_id:
+        deployment = monitor.get_latest_deployment(args.project_id)
+        if not deployment:
+            print("No deployments found for this project")
+            return
+        
+        print(f"Monitoring latest deployment: {deployment['id']}")
+        final_status = monitor.monitor_deployment(
+            deployment["id"],
+            args.poll_interval,
+            args.timeout
+        )
+        print(f"Deployment monitoring completed. Final status: {final_status}")
+        return
+    
+    # If project name is provided, find matching project
+    if args.project_name:
+        matching_projects = [p for p in projects if args.project_name.lower() in p['name'].lower()]
+        if not matching_projects:
+            print(f"No projects found matching: {args.project_name}")
+            print("Available projects:")
+            for i, project in enumerate(projects):
+                print(f"{i + 1}. {project['name']} ({project['id']})")
+            return
+        
+        if len(matching_projects) > 1:
+            print(f"Multiple projects found matching '{args.project_name}':")
+            for i, project in enumerate(matching_projects):
+                print(f"{i + 1}. {project['name']} ({project['id']})")
+            # Use the first matching project
+            project = matching_projects[0]
+            print(f"Using first matching project: {project['name']}")
+        else:
+            project = matching_projects[0]
+        
+        deployment = monitor.get_latest_deployment(project["id"])
+        if not deployment:
+            print("No deployments found for this project")
+            return
+        
+        print(f"Monitoring deployment: {deployment['id']}")
+        print(f"Current status: {deployment['status']}")
+        
+        final_status = monitor.monitor_deployment(
+            deployment["id"],
+            args.poll_interval,
+            args.timeout
+        )
+        print(f"\nDeployment monitoring completed. Final status: {final_status}")
+        return
+    
+    # Auto-select first project if requested
+    if args.auto_select:
+        project = projects[0]
+        print(f"Auto-selected project: {project['name']}")
+        
+        deployment = monitor.get_latest_deployment(project["id"])
+        if not deployment:
+            print("No deployments found for this project")
+            return
+        
+        print(f"Monitoring deployment: {deployment['id']}")
+        print(f"Current status: {deployment['status']}")
+        
+        final_status = monitor.monitor_deployment(
+            deployment["id"],
+            args.poll_interval,
+            args.timeout
+        )
+        print(f"\nDeployment monitoring completed. Final status: {final_status}")
+        return
+    
+    # Default behavior: auto-select first project with a message
+    print("No specific project specified. Auto-selecting first project.")
     print("Available projects:")
     for i, project in enumerate(projects):
         print(f"{i + 1}. {project['name']} ({project['id']})")
     
-    # For simplicity, use the first project
-    # You can modify this to let user choose or accept project ID as argument
-    if len(projects) == 1:
-        project = projects[0]
-    else:
-        choice = input(f"Select project (1-{len(projects)}): ")
-        try:
-            project = projects[int(choice) - 1]
-        except (ValueError, IndexError):
-            print("Invalid selection, using first project")
-            project = projects[0]
+    project = projects[0]
+    print(f"\nAuto-selected project: {project['name']}")
     
-    print(f"Selected project: {project['name']}")
-    
-    # Get latest deployment
     deployment = monitor.get_latest_deployment(project["id"])
     if not deployment:
         print("No deployments found for this project")
@@ -226,8 +324,11 @@ def main():
     print(f"Monitoring deployment: {deployment['id']}")
     print(f"Current status: {deployment['status']}")
     
-    # Monitor deployment
-    final_status = monitor.monitor_deployment(deployment["id"])
+    final_status = monitor.monitor_deployment(
+        deployment["id"],
+        args.poll_interval,
+        args.timeout
+    )
     
     print(f"\nDeployment monitoring completed. Final status: {final_status}")
 
