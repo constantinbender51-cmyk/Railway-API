@@ -6,6 +6,7 @@ Script to retrieve and display logs of the most recent Railway deployment.
 import os
 import requests
 import sys
+import json
 
 # Configuration
 RAILWAY_API_BASE = "https://backboard.railway.app/graphql/v2"
@@ -35,14 +36,31 @@ class RailwayDeploymentMonitor:
             payload["variables"] = variables
 
         try:
+            print(f"Making GraphQL request to: {RAILWAY_API_BASE}")
             response = requests.post(
                 RAILWAY_API_BASE,
                 json=payload,
                 headers=self.headers,
                 timeout=30
             )
-            response.raise_for_status()
-            return response.json()
+            
+            print(f"Response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"Error response: {response.text}")
+                return {}
+                
+            result = response.json()
+            
+            # Check for GraphQL errors
+            if "errors" in result:
+                print("GraphQL errors found:")
+                for error in result["errors"]:
+                    print(f"  - {error}")
+                return {}
+                
+            return result
+            
         except requests.exceptions.RequestException as e:
             print(f"API request failed: {e}")
             return {}
@@ -50,16 +68,14 @@ class RailwayDeploymentMonitor:
     def get_latest_deployment(self, project_id: str) -> dict:
         """Get the latest deployment for a project"""
         query = """
-        query GetDeployments($projectId: String!) {
-            deployments(input: {projectId: $projectId}, first: 1) {
-                edges {
-                    node {
-                        id
-                        status
-                        createdAt
-                        environment {
-                            name
-                        }
+        query GetDeployments($projectId: ID!) {
+            deployments(projectId: $projectId, limit: 1) {
+                nodes {
+                    id
+                    status
+                    createdAt
+                    environment {
+                        name
                     }
                 }
             }
@@ -70,11 +86,12 @@ class RailwayDeploymentMonitor:
         if not result:
             return None
         
-        deployments = result.get("data", {}).get("deployments", {}).get("edges", [])
+        deployments = result.get("data", {}).get("deployments", {}).get("nodes", [])
         if not deployments:
+            print("No deployments found in response")
             return None
             
-        deployment = deployments[0]["node"]
+        deployment = deployments[0]
         return {
             "id": deployment["id"], 
             "status": deployment["status"], 
@@ -85,9 +102,9 @@ class RailwayDeploymentMonitor:
     def get_deployment_logs(self, deployment_id: str) -> list:
         """Get logs for a deployment"""
         query = """
-        query GetDeploymentLogs($deploymentId: String!) {
+        query GetDeploymentLogs($deploymentId: ID!) {
             deployment(id: $deploymentId) {
-                deploymentsLogs {
+                logs {
                     timestamp
                     message
                     level
@@ -102,9 +119,11 @@ class RailwayDeploymentMonitor:
             
         deployment = result.get("data", {}).get("deployment", {})
         if not deployment:
+            print("No deployment data found in response")
             return []
             
-        logs = deployment.get("deploymentsLogs", [])
+        logs = deployment.get("logs", [])
+        print(f"Retrieved {len(logs)} log entries")
         return sorted(logs, key=lambda x: x["timestamp"])
 
 def main():
